@@ -1,0 +1,16 @@
+[project]
+name = "voice-clone"
+version = "0.1.0"
+description = "Voice cloning using MLX Audio and Qwen3-TTS"
+requires-python = ">=3.12"
+dependencies = [
+    "mlx-audio @ git+https://github.com/blaizzy/mlx-audio.git",
+    "soundfile",
+    "numpy",
+    "gradio",
+    "textual",
+    "sounddevice",
+    "resemble-enhance",
+    "torch",
+    "torchaudio",
+]
