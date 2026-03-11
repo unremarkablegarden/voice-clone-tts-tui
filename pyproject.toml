@@ -1,6 +1,6 @@
 [project]
 name = "voice-clone"
-version = "0.1.0"
+version = "0.0.1"
 description = "Voice cloning using MLX Audio and Qwen3-TTS"
 requires-python = ">=3.12"
 dependencies = [
