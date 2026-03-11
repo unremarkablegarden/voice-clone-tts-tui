@@ -1,0 +1,9 @@
+mlx-audio @ git+https://github.com/blaizzy/mlx-audio.git
+soundfile
+numpy
+gradio
+textual
+sounddevice
+resemble-enhance
+torch
+torchaudio
