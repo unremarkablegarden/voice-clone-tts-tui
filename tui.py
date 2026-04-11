@@ -286,10 +286,10 @@ class VoiceCloneApp(App):
         padding: 0 1;
         margin-top: 1;
     }
-    #batch-speed-lang-row {
+    #batch-speed-lang-row, #batch-lang-speed-row {
         height: auto;
     }
-    #batch-speed-lang-row > * {
+    #batch-speed-lang-row > *, #batch-lang-speed-row > * {
         width: 1fr;
         margin-right: 1;
     }
@@ -425,7 +425,7 @@ class VoiceCloneApp(App):
                                     yield Label("Max chars")
                                     yield Input("200", id="batch-max-chars")
 
-                            with Horizontal(id="batch-speed-lang-row"):
+                            with Horizontal(id="batch-lang-speed-row"):
                                 with Vertical():
                                     yield Label("Language")
                                     yield Select(LANGUAGES, value="english", id="batch-language-select")
