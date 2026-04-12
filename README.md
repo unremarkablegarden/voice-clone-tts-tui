@@ -39,7 +39,7 @@ Full-featured terminal interface with four tabs:
 - **Create Voice** — select source audio from `ref_audio/`, optionally preprocess and enhance, save as a named voice profile to `voices/`
 - **Generate** — pick a mode (Clone / Custom Voice / Voice Design), configure mode-specific inputs, type text, adjust language/speed/quality, generate speech, play/save/enhance the output
 - **Batch** — same mode picker, split a text file into segments, generate each as a numbered WAV, optionally join them
-- **Cleanup** — enhance audio files with AI denoising
+- **Cleanup** — enhance audio files with AI denoising, with configurable enhancement settings
 
 A **Mode** selector at the top of the Generate and Batch tabs switches between the three modes. Switching mode evicts the current model and loads the new one on next generate. The selected mode is persisted across sessions.
 
@@ -64,6 +64,8 @@ A **Mode** selector at the top of the Generate and Batch tabs switches between t
 | Aiden | Sunny American male, clear midrange | English |
 | Ono_Anna | Playful Japanese female, light nimble | Japanese |
 | Sohee | Warm Korean female, rich emotion | Korean |
+
+A system sound (Glass.aiff) plays when generation or enhancement finishes. Playback state (Play/Stop buttons) resets automatically when audio finishes playing.
 
 Keyboard shortcuts: `Ctrl+G` generate, `Ctrl+P` play, `Ctrl+S` save, `Q` quit.
 
@@ -147,7 +149,7 @@ AI audio enhancement powered by [Resemble Enhance](https://github.com/resemble-a
 
 Post-generation enhancement saves to `output/generate-{timestamp}_enhanced.wav` alongside the original 24kHz file. Play switches to the enhanced version automatically.
 
-Enhancement parameters (via `enhance_audio.py`):
+Enhancement parameters are configurable in the TUI's Cleanup tab under a collapsible "Enhancement Settings" panel, or via `enhance_audio.py` CLI flags:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -201,6 +203,7 @@ tui.py              — Terminal UI (Textual)
 ui.py               — Web UI (Gradio, clone mode only)
 enhance_audio.py    — AI audio enhancement (Resemble Enhance)
 prep_reference.sh   — ffmpeg preprocessing pipeline
+run.sh              — launch script (loads venv, starts TUI)
 ref_audio/          — source audio files
 voices/             — created voice profiles (ref_audio.wav + meta.json)
 output/             — generated audio files

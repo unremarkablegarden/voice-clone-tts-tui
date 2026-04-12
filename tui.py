@@ -556,6 +556,27 @@ class VoiceCloneApp(App):
                             prompt="Select a file",
                             id="cleanup-select",
                         )
+                        with Collapsible(title="Enhancement Settings"):
+                            with Horizontal(classes="quality-row"):
+                                yield Label("NFE (steps)")
+                                yield Input("32", id="enh-nfe")
+                            with Horizontal(classes="quality-row"):
+                                yield Label("Solver")
+                                yield Select(
+                                    [("Midpoint", "midpoint"), ("RK4", "rk4"), ("Euler", "euler")],
+                                    value="midpoint",
+                                    allow_blank=False,
+                                    id="enh-solver",
+                                )
+                            with Horizontal(classes="quality-row"):
+                                yield Label("Denoise (λ)")
+                                yield Input("0.5", id="enh-lambd")
+                            with Horizontal(classes="quality-row"):
+                                yield Label("Temperature (τ)")
+                                yield Input("0.5", id="enh-tau")
+                            with Horizontal(classes="quality-row"):
+                                yield Label("")
+                                yield Checkbox("Denoise only (skip diffusion)", value=False, id="enh-denoise-only")
                         with Horizontal(id="cleanup-btns"):
                             yield Button("Enhance Selected", id="cleanup-enhance-btn", variant="warning")
                             yield Button("Enhance All", id="cleanup-enhance-all-btn", variant="warning")
@@ -623,6 +644,16 @@ class VoiceCloneApp(App):
             self.gen_log_message(
                 f"[yellow]Next generate will load {MODEL_IDS[self.mode]}[/yellow]"
             )
+
+    def _notify_sound(self) -> None:
+        """Play a short macOS system sound. Fire-and-forget, no error on failure."""
+        try:
+            subprocess.Popen(
+                ["afplay", "/System/Library/Sounds/Glass.aiff"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
     def create_log_message(self, msg: str) -> None:
         self.query_one("#create-log", RichLog).write(msg)
@@ -994,6 +1025,7 @@ class VoiceCloneApp(App):
         )
         self.call_from_thread(self._update_stats, stats)
         self.call_from_thread(self._generation_done, True)
+        self._notify_sound()
 
     def _update_stats(self, stats: str) -> None:
         self.query_one("#stats", Static).update(stats)
@@ -1046,6 +1078,7 @@ class VoiceCloneApp(App):
                 self.gen_log_message,
                 f"[bold green]Enhanced![/bold green] Saved to {enhanced_path}",
             )
+            self._notify_sound()
         except Exception as e:
             self.call_from_thread(
                 self.gen_log_message,
@@ -1322,22 +1355,39 @@ class VoiceCloneApp(App):
         sel = self.query_one("#cleanup-select", Select)
         sel.set_options(scan_audio_files())
 
+    def _read_enhance_settings(self) -> dict:
+        try:
+            nfe = int(self.query_one("#enh-nfe", Input).value)
+        except ValueError:
+            nfe = 32
+        solver = self.query_one("#enh-solver", Select).value or "midpoint"
+        try:
+            lambd = float(self.query_one("#enh-lambd", Input).value)
+        except ValueError:
+            lambd = 0.5
+        try:
+            tau = float(self.query_one("#enh-tau", Input).value)
+        except ValueError:
+            tau = 0.5
+        denoise_only = self.query_one("#enh-denoise-only", Checkbox).value
+        return dict(nfe=nfe, solver=solver, lambd=lambd, tau=tau, denoise_only=denoise_only)
+
     def cleanup_enhance_selected(self) -> None:
         selected = self.query_one("#cleanup-select", Select).value
         if selected is Select.BLANK:
             self.cleanup_log_message("[red]Please select a file[/red]")
             return
-        self.run_cleanup_enhance([selected])
+        self.run_cleanup_enhance([selected], self._read_enhance_settings())
 
     def cleanup_enhance_all(self) -> None:
         files = [path for _, path in scan_audio_files()]
         if not files:
             self.cleanup_log_message("[yellow]No unenhanced files found[/yellow]")
             return
-        self.run_cleanup_enhance(files)
+        self.run_cleanup_enhance(files, self._read_enhance_settings())
 
     @work(thread=True)
-    def run_cleanup_enhance(self, paths: list[str]) -> None:
+    def run_cleanup_enhance(self, paths: list[str], enh: dict) -> None:
         self.call_from_thread(
             self.cleanup_log_message,
             f"[bold]Enhancing {len(paths)} file{'s' if len(paths) > 1 else ''}...[/bold]",
@@ -1370,6 +1420,7 @@ class VoiceCloneApp(App):
                     output_path=str(enhanced_path),
                     target_sr=target_sr,
                     on_progress=on_progress,
+                    **enh,
                 )
                 self.call_from_thread(
                     self.cleanup_log_message,
@@ -1397,9 +1448,24 @@ class VoiceCloneApp(App):
         audio = np.ascontiguousarray(self.generated_audio, dtype=np.float32)
         sd.play(audio, self.generated_sr, blocksize=2048)
         self.gen_log_message("Playing audio...")
+        self.query_one("#play-btn", Button).disabled = True
+        self.query_one("#stop-btn", Button).disabled = False
+        self._wait_for_playback()
+
+    @work(thread=True)
+    def _wait_for_playback(self) -> None:
+        sd.wait()
+        self.call_from_thread(self._playback_finished)
+
+    def _playback_finished(self) -> None:
+        self.query_one("#play-btn", Button).disabled = False
+        self.query_one("#stop-btn", Button).disabled = True
+        self.gen_log_message("[dim]Playback finished[/dim]")
 
     def stop_audio(self) -> None:
         sd.stop()
+        self.query_one("#play-btn", Button).disabled = False
+        self.query_one("#stop-btn", Button).disabled = True
         self.gen_log_message("Playback stopped")
 
     def action_save_as(self) -> None:

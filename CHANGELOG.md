@@ -11,6 +11,10 @@
 - CLI flags: `--mode {clone,custom_voice,voice_design}`, `--voice`, `--instruct`, `--lang-code`.
 - `auto_confirm` parameter on `load_model()` for non-interactive environments (TUI model reload).
 - `CUSTOM_VOICE_SPEAKERS` constant with upstream speaker metadata.
+- **Enhancement settings UI** in the Cleanup tab — collapsible panel exposing NFE, solver, denoise λ, temperature τ, and denoise-only toggle.
+- **System sound notification** (Glass.aiff) on generation and enhancement completion.
+- **Automatic playback state reset** — Play/Stop buttons update when audio finishes playing (via `sd.wait()` in a background worker).
+- `run.sh` launch script — loads the venv and starts the TUI.
 
 ### Changed
 - **Switched to 8-bit quantised models** (`Qwen3-TTS-12Hz-1.7B-*-8bit`). Roughly half the memory of bf16 (~1.5 GB vs ~3.4 GB) and slightly faster on Apple Silicon.
