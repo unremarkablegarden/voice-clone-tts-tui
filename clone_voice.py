@@ -12,10 +12,26 @@ import numpy as np
 import soundfile as sf
 
 
-# Model preference order: 1.7B bf16 → 0.6B bf16
-MODELS = [
-    "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
-    "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+MODES = ("clone", "custom_voice", "voice_design")
+
+MODEL_IDS = {
+    "clone":        "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+    "custom_voice": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
+    "voice_design": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
+}
+
+# Upstream Qwen3-TTS README model card — 9 preset speakers for CustomVoice.
+# Tuple shape: (speaker_id, short_description, native_language)
+CUSTOM_VOICE_SPEAKERS = [
+    ("Vivian",   "Bright, slightly edgy young female voice",      "Chinese"),
+    ("Serena",   "Warm, gentle young female voice",                "Chinese"),
+    ("Uncle_Fu", "Seasoned male, low mellow timbre",               "Chinese"),
+    ("Dylan",    "Youthful Beijing male, clear natural timbre",    "Chinese (Beijing)"),
+    ("Eric",     "Lively Chengdu male, slightly husky brightness", "Chinese (Sichuan)"),
+    ("Ryan",     "Dynamic male voice, strong rhythmic drive",      "English"),
+    ("Aiden",    "Sunny American male, clear midrange",            "English"),
+    ("Ono_Anna", "Playful Japanese female, light nimble timbre",   "Japanese"),
+    ("Sohee",    "Warm Korean female, rich emotion",               "Korean"),
 ]
 
 SAMPLE_RATE = 24000
@@ -23,7 +39,13 @@ MAX_CHUNK_CHARS = 200  # Characters per chunk for long text
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Voice cloning with Qwen3-TTS (MLX)")
+    parser = argparse.ArgumentParser(description="Qwen3-TTS (MLX) — clone / custom_voice / voice_design")
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default="clone",
+        help="Generation mode (default: clone)",
+    )
     parser.add_argument(
         "--text",
         required=True,
@@ -31,13 +53,23 @@ def parse_args():
     )
     parser.add_argument(
         "--ref_audio",
-        required=True,
-        help="Path to reference audio WAV file",
+        default=None,
+        help="[clone mode] Path to reference audio WAV file",
     )
     parser.add_argument(
         "--ref_text",
         default="",
-        help="Transcript of the reference audio (improves quality)",
+        help="[clone mode] Transcript of the reference audio (improves quality)",
+    )
+    parser.add_argument(
+        "--voice",
+        default=None,
+        help="[custom_voice mode] Speaker name (e.g. Ryan, Vivian, Uncle_Fu)",
+    )
+    parser.add_argument(
+        "--instruct",
+        default=None,
+        help="[custom_voice] Optional emotion/style. [voice_design] Required voice description.",
     )
     parser.add_argument(
         "--output",
@@ -45,9 +77,16 @@ def parse_args():
         help="Output WAV path (default: output/output.wav)",
     )
     parser.add_argument(
+        "--lang-code",
+        dest="lang_code",
+        default="Auto",
+        help="Language code: Auto, English, Chinese, Japanese, etc. (default: Auto)",
+    )
+    # Hidden alias for the old --language flag; forwards to --lang-code.
+    parser.add_argument(
         "--language",
-        default="English",
-        help="Language for synthesis (default: English)",
+        dest="lang_code",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--speed",
@@ -58,7 +97,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         default=None,
-        help="Override model ID (default: auto-select)",
+        help="Override model ID (default: auto-select per mode)",
     )
     parser.add_argument(
         "--test",
@@ -216,61 +255,60 @@ def _confirm_download(model_id: str) -> bool:
         return False
 
 
+def load_model(mode: str = "clone", model_override: str | None = None, auto_confirm: bool = False):
+    """Load the MLX model for a given mode, prompting before download.
+
+    Set auto_confirm=True when no interactive stdin is available (e.g. inside
+    a TUI reload). Returns (model, model_id). Raises on any failure.
+    """
+    from mlx_audio.tts.utils import load_model as _mlx_load_model
+
+    if mode not in MODEL_IDS:
+        raise ValueError(f"unknown mode: {mode!r} (expected one of {MODES})")
+    model_id = model_override or MODEL_IDS[mode]
+
+    if not _is_model_cached(model_id):
+        if not auto_confirm and not _confirm_download(model_id):
+            print(f"Skipping {model_id}")
+            sys.exit(1)
+
+    print(f"Loading model: {model_id}")
+    transformers_logger = logging.getLogger("transformers")
+    prev_level = transformers_logger.level
+    transformers_logger.setLevel(logging.ERROR)
+    try:
+        model = _mlx_load_model(model_id)
+    finally:
+        transformers_logger.setLevel(prev_level)
+
+    # Workaround: newer transformers breaks fix_mistral_regex kwarg
+    # in post_load_hook, so the tokenizer may silently fail to load.
+    if getattr(model, "tokenizer", None) is None:
+        from transformers import AutoTokenizer
+        from huggingface_hub import snapshot_download
+        model_path = snapshot_download(model_id)
+        model.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        print("  Loaded tokenizer (workaround)")
+
+    print(f"Model loaded successfully: {model_id}")
+    return model, model_id
+
+
 def load_model_with_fallback(model_override=None):
-    """Try loading models in preference order, prompting before download."""
-    from mlx_audio.tts.utils import load_model
-
-    models = [model_override] if model_override else MODELS
-
-    for model_id in models:
-        if not _is_model_cached(model_id):
-            if not _confirm_download(model_id):
-                print(f"Skipping {model_id}")
-                continue
-
-        print(f"Loading model: {model_id}")
-        try:
-            transformers_logger = logging.getLogger("transformers")
-            prev_level = transformers_logger.level
-            transformers_logger.setLevel(logging.ERROR)
-            try:
-                model = load_model(model_id)
-            finally:
-                transformers_logger.setLevel(prev_level)
-
-            # Workaround: newer transformers breaks fix_mistral_regex kwarg
-            # in post_load_hook, so the tokenizer may silently fail to load.
-            if getattr(model, "tokenizer", None) is None:
-                from transformers import AutoTokenizer
-                from huggingface_hub import snapshot_download
-                model_path = snapshot_download(model_id)
-                model.tokenizer = AutoTokenizer.from_pretrained(model_path)
-                print("  Loaded tokenizer (workaround)")
-
-            print(f"Model loaded successfully: {model_id}")
-            return model, model_id
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "memory" in error_msg or "oom" in error_msg or "alloc" in error_msg:
-                print(f"Out of memory with {model_id}, trying smaller model...")
-                continue
-            raise
-
-    print("Error: Could not load any model. Try the 0.6B model explicitly:", file=sys.stderr)
-    print("  --model mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16", file=sys.stderr)
-    sys.exit(1)
+    """Back-compat shim for ui.py — loads the clone (Base) model."""
+    return load_model("clone", model_override=model_override)
 
 
 def run_test(model):
-    """Quick test with a built-in voice."""
+    """Quick test with a built-in voice. Requires the CustomVoice model."""
     print("\n=== Quick Test (built-in voice) ===")
     test_text = "Hello! This is a quick test of the voice synthesis system running on Apple Silicon."
 
     start = time.time()
     results = list(model.generate(
         text=test_text,
-        voice="Chelsie",
-        language="English",
+        voice="Ryan",
+        lang_code="English",
     ))
     elapsed = time.time() - start
 
@@ -293,43 +331,116 @@ def run_test(model):
     return True
 
 
-def generate_cloned(model, text, ref_audio, ref_text, language, speed):
-    """Generate speech using voice cloning."""
-    kwargs = dict(
+def generate(
+    mode: str,
+    model,
+    text: str,
+    *,
+    lang_code: str = "Auto",
+    speed: float = 1.0,
+    temperature: float = 0.9,
+    top_k: int = 50,
+    top_p: float = 1.0,
+    repetition_penalty: float = 1.05,
+    # clone
+    ref_audio: str | None = None,
+    ref_text: str | None = None,
+    # custom_voice
+    voice: str | None = None,
+    # custom_voice + voice_design
+    instruct: str | None = None,
+):
+    """Mode-aware generation dispatcher.
+
+    Builds the right kwargs per mode and calls model.generate().
+    Returns (audio_np, sample_rate) — audio is None if the model returned nothing.
+    """
+    kwargs: dict = dict(
         text=text,
-        ref_audio=ref_audio,
-        language=language,
+        lang_code=lang_code,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
     )
-    if ref_text:
-        kwargs["ref_text"] = ref_text
     if speed != 1.0:
         kwargs["speed"] = speed
 
+    if mode == "clone":
+        if not ref_audio:
+            raise ValueError("clone mode requires ref_audio")
+        kwargs["ref_audio"] = ref_audio
+        if ref_text:
+            kwargs["ref_text"] = ref_text
+    elif mode == "custom_voice":
+        if not voice:
+            raise ValueError("custom_voice mode requires voice (speaker name)")
+        kwargs["voice"] = voice
+        if instruct:
+            kwargs["instruct"] = instruct
+    elif mode == "voice_design":
+        if not instruct:
+            raise ValueError("voice_design mode requires instruct (voice description)")
+        kwargs["instruct"] = instruct
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
+
     results = list(model.generate(**kwargs))
     if not results:
-        return None, 0
+        return None, 0, 0.0
 
-    audio = np.array(results[0].audio)
-    sr = getattr(results[0], "sample_rate", SAMPLE_RATE)
+    result = results[0]
+    audio = np.array(result.audio)
+    sr = getattr(result, "sample_rate", SAMPLE_RATE)
+    peak_mem = float(getattr(result, "peak_memory_usage", 0.0) or 0.0)
+    return audio, sr, peak_mem
+
+
+def generate_cloned(model, text, ref_audio, ref_text, language, speed):
+    """Back-compat shim for ui.py — routes to generate() in clone mode.
+
+    Old callers passed `language=` (a pretty-cased name like "English"); we
+    now correctly forward it as `lang_code=`, which mlx_audio actually reads.
+    Returns the old (audio, sr) tuple — peak memory is dropped here.
+    """
+    audio, sr, _ = generate(
+        "clone",
+        model,
+        text,
+        lang_code=language or "Auto",
+        speed=speed,
+        ref_audio=ref_audio,
+        ref_text=ref_text or None,
+    )
     return audio, sr
 
 
 def main():
     args = parse_args()
 
-    # Load model
-    model, model_id = load_model_with_fallback(args.model)
+    # Load model for the selected mode
+    model, model_id = load_model(args.mode, model_override=args.model)
 
-    # Quick test mode
+    # Quick test mode (built-in voice, mode-agnostic)
     if args.test:
         success = run_test(model)
         sys.exit(0 if success else 1)
 
-    # Validate ref audio
-    if not os.path.isfile(args.ref_audio):
-        print(f"Error: Reference audio not found: {args.ref_audio}", file=sys.stderr)
-        print("Run prep_reference.sh first to create a reference clip.", file=sys.stderr)
-        sys.exit(1)
+    # Validate mode-specific inputs
+    if args.mode == "clone":
+        if not args.ref_audio or not os.path.isfile(args.ref_audio):
+            print(f"Error: clone mode requires --ref_audio (got: {args.ref_audio!r})", file=sys.stderr)
+            print("Run prep_reference.sh first to create a reference clip.", file=sys.stderr)
+            sys.exit(1)
+    elif args.mode == "custom_voice":
+        if not args.voice:
+            valid = ", ".join(s[0] for s in CUSTOM_VOICE_SPEAKERS)
+            print(f"Error: custom_voice mode requires --voice (one of: {valid})", file=sys.stderr)
+            sys.exit(1)
+    elif args.mode == "voice_design":
+        if not args.instruct:
+            print("Error: voice_design mode requires --instruct (voice description)", file=sys.stderr)
+            sys.exit(1)
 
     # Get text
     text = get_text(args.text)
@@ -337,9 +448,17 @@ def main():
         print("Error: No text provided.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nModel:     {model_id}")
-    print(f"Ref audio: {args.ref_audio}")
-    print(f"Language:  {args.language}")
+    print(f"\nMode:      {args.mode}")
+    print(f"Model:     {model_id}")
+    if args.mode == "clone":
+        print(f"Ref audio: {args.ref_audio}")
+    elif args.mode == "custom_voice":
+        print(f"Voice:     {args.voice}")
+        if args.instruct:
+            print(f"Instruct:  {args.instruct}")
+    elif args.mode == "voice_design":
+        print(f"Instruct:  {args.instruct}")
+    print(f"Lang:      {args.lang_code}")
     print(f"Speed:     {args.speed}")
     print(f"Text:      {text[:80]}{'...' if len(text) > 80 else ''}")
 
@@ -348,6 +467,7 @@ def main():
     print(f"Chunks:    {len(chunks)}")
 
     all_audio = []
+    sr = SAMPLE_RATE
     total_start = time.time()
 
     for i, chunk in enumerate(chunks, 1):
@@ -355,14 +475,17 @@ def main():
         chunk_start = time.time()
 
         try:
-            audio, sr = generate_cloned(
-                model, chunk, args.ref_audio, args.ref_text,
-                args.language, args.speed,
+            audio, sr, _ = generate(
+                args.mode, model, chunk,
+                lang_code=args.lang_code,
+                speed=args.speed,
+                ref_audio=args.ref_audio,
+                ref_text=args.ref_text or None,
+                voice=args.voice,
+                instruct=args.instruct,
             )
         except Exception as e:
             print(f"Error generating chunk {i}: {e}", file=sys.stderr)
-            if "memory" in str(e).lower():
-                print("Hint: Try the 0.6B model with --model mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16", file=sys.stderr)
             sys.exit(1)
 
         if audio is None:

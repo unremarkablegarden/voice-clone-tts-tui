@@ -33,29 +33,45 @@ from textual.widgets import (
 )
 
 from clone_voice import (
+    CUSTOM_VOICE_SPEAKERS,
+    MODEL_IDS,
+    MODES,
     SAMPLE_RATE,
     chunk_text,
     clean_markdown,
-    load_model_with_fallback,
+    generate as tts_generate,
+    load_model,
     split_into_segments,
 )
 
+# Upstream Qwen3-TTS supports these 10 languages; "Auto" lets the model detect.
 LANGUAGES = [
-    ("English", "english"),
-    ("Chinese", "chinese"),
-    ("Japanese", "japanese"),
-    ("Korean", "korean"),
-    ("French", "french"),
-    ("German", "german"),
-    ("Spanish", "spanish"),
-    ("Italian", "italian"),
-    ("Portuguese", "portuguese"),
-    ("Russian", "russian"),
-    ("Arabic", "arabic"),
-    ("Thai", "thai"),
-    ("Indonesian", "indonesian"),
-    ("Vietnamese", "vietnamese"),
+    ("Auto", "Auto"),
+    ("English", "English"),
+    ("Chinese", "Chinese"),
+    ("Japanese", "Japanese"),
+    ("Korean", "Korean"),
+    ("French", "French"),
+    ("German", "German"),
+    ("Spanish", "Spanish"),
+    ("Italian", "Italian"),
+    ("Portuguese", "Portuguese"),
+    ("Russian", "Russian"),
 ]
+
+MODE_OPTIONS = [
+    ("Clone — match a reference voice", "clone"),
+    ("Custom Voice — preset speaker + instruct", "custom_voice"),
+    ("Voice Design — describe a voice", "voice_design"),
+]
+
+
+def _speaker_options() -> list[tuple[str, str]]:
+    """Build a human-friendly speaker Select option list for CustomVoice mode."""
+    return [
+        (f"{name} — {desc} ({lang})", name)
+        for name, desc, lang in CUSTOM_VOICE_SPEAKERS
+    ]
 
 REF_AUDIO_DIR = Path(__file__).parent / "ref_audio"
 VOICES_DIR = Path(__file__).parent / "voices"
@@ -207,8 +223,18 @@ class VoiceCloneApp(App):
     .field-label {
         color: $text-muted;
     }
-    #source-audio-select, #voice-select {
+    #source-audio-select, #voice-select, #batch-voice-select {
         width: 100%;
+    }
+    #gen-mode-select, #batch-mode-select,
+    #gen-speaker-select, #batch-speaker-select,
+    #gen-cv-instruct, #batch-cv-instruct,
+    #gen-vd-instruct, #batch-vd-instruct {
+        width: 100%;
+    }
+    .mode-container {
+        height: auto;
+        margin-bottom: 1;
     }
     #ref-text {
         height: 10;
@@ -303,10 +329,12 @@ class VoiceCloneApp(App):
         Binding("q", "quit", "Quit", show=True),
     ]
 
-    def __init__(self, model, model_id: str):
+    def __init__(self, model, model_id: str, mode: str = "clone"):
         super().__init__()
         self.model = model
         self.model_id = model_id
+        self.mode = mode if mode in MODES else "clone"
+        self._model_mode = mode  # tracks which mode's weights are currently loaded
         self.generated_audio = None
         self.generated_sr = SAMPLE_RATE
         self.output_path = None
@@ -345,12 +373,41 @@ class VoiceCloneApp(App):
                 with Horizontal():
                     with Vertical(id="gen-left-panel"):
                         with Vertical(id="gen-fields"):
-                            yield Label("Voice", classes="field-label")
+                            yield Label("Mode", classes="field-label")
                             yield Select(
-                                scan_voices(),
-                                prompt="Select a voice",
-                                id="voice-select",
+                                MODE_OPTIONS,
+                                value=self.mode,
+                                allow_blank=False,
+                                id="gen-mode-select",
                             )
+
+                            with Vertical(id="gen-clone-container", classes="mode-container"):
+                                yield Label("Voice (reference)", classes="field-label")
+                                yield Select(
+                                    scan_voices(),
+                                    prompt="Select a voice",
+                                    id="voice-select",
+                                )
+
+                            with Vertical(id="gen-custom-voice-container", classes="mode-container"):
+                                yield Label("Speaker", classes="field-label")
+                                yield Select(
+                                    _speaker_options(),
+                                    prompt="Select a preset speaker",
+                                    id="gen-speaker-select",
+                                )
+                                yield Label("Instruct (optional)", classes="field-label")
+                                yield Input(
+                                    placeholder="e.g. 'Very happy' or 'Whispering softly'",
+                                    id="gen-cv-instruct",
+                                )
+
+                            with Vertical(id="gen-voice-design-container", classes="mode-container"):
+                                yield Label("Voice Description", classes="field-label")
+                                yield Input(
+                                    placeholder="e.g. 'Calm British narrator, deep and measured'",
+                                    id="gen-vd-instruct",
+                                )
 
                             yield Label("Text to Synthesize", classes="field-label")
                             yield TextArea(id="synth-text")
@@ -358,7 +415,7 @@ class VoiceCloneApp(App):
                             with Horizontal(id="speed-lang-row"):
                                 with Vertical():
                                     yield Label("Language")
-                                    yield Select(LANGUAGES, value="english", id="language-select")
+                                    yield Select(LANGUAGES, value="Auto", allow_blank=False, id="language-select")
                                 with Vertical():
                                     yield Label("Speed")
                                     yield Input("1.0", id="speed-input")
@@ -396,12 +453,41 @@ class VoiceCloneApp(App):
                 with Horizontal():
                     with Vertical(id="batch-left-panel"):
                         with Vertical(id="batch-fields"):
-                            yield Label("Voice", classes="field-label")
+                            yield Label("Mode", classes="field-label")
                             yield Select(
-                                scan_voices(),
-                                prompt="Select a voice",
-                                id="batch-voice-select",
+                                MODE_OPTIONS,
+                                value=self.mode,
+                                allow_blank=False,
+                                id="batch-mode-select",
                             )
+
+                            with Vertical(id="batch-clone-container", classes="mode-container"):
+                                yield Label("Voice (reference)", classes="field-label")
+                                yield Select(
+                                    scan_voices(),
+                                    prompt="Select a voice",
+                                    id="batch-voice-select",
+                                )
+
+                            with Vertical(id="batch-custom-voice-container", classes="mode-container"):
+                                yield Label("Speaker", classes="field-label")
+                                yield Select(
+                                    _speaker_options(),
+                                    prompt="Select a preset speaker",
+                                    id="batch-speaker-select",
+                                )
+                                yield Label("Instruct (optional)", classes="field-label")
+                                yield Input(
+                                    placeholder="e.g. 'Very happy'",
+                                    id="batch-cv-instruct",
+                                )
+
+                            with Vertical(id="batch-voice-design-container", classes="mode-container"):
+                                yield Label("Voice Description", classes="field-label")
+                                yield Input(
+                                    placeholder="e.g. 'Calm British narrator, deep and measured'",
+                                    id="batch-vd-instruct",
+                                )
 
                             yield Label("Source File (.txt / .md)", classes="field-label")
                             yield Input(placeholder="path/to/source.txt", id="batch-source-input")
@@ -428,7 +514,7 @@ class VoiceCloneApp(App):
                             with Horizontal(id="batch-lang-speed-row"):
                                 with Vertical():
                                     yield Label("Language")
-                                    yield Select(LANGUAGES, value="english", id="batch-language-select")
+                                    yield Select(LANGUAGES, value="Auto", allow_blank=False, id="batch-language-select")
                                 with Vertical():
                                     yield Label("Speed")
                                     yield Input("1.0", id="batch-speed-input")
@@ -484,6 +570,8 @@ class VoiceCloneApp(App):
             self.theme = saved_theme
         self.sub_title = self.model_id
         self.gen_log_message(f"[green]Model loaded: {self.model_id}[/green]")
+        self.gen_log_message(f"[dim]Mode: {self.mode}[/dim]")
+        self._apply_mode_visibility()
         self.query_one("#generate-btn", Button).disabled = False
 
     def watch_theme(self, new_theme: str) -> None:
@@ -491,6 +579,50 @@ class VoiceCloneApp(App):
         if config.get("theme") != new_theme:
             config["theme"] = new_theme
             _save_config(config)
+
+    def _persist_mode(self) -> None:
+        config = _load_config()
+        if config.get("mode") != self.mode:
+            config["mode"] = self.mode
+            _save_config(config)
+
+    def _apply_mode_visibility(self) -> None:
+        """Show only the container matching self.mode on both Generate and Batch tabs."""
+        for prefix in ("gen", "batch"):
+            for mode, suffix in (
+                ("clone",        "clone-container"),
+                ("custom_voice", "custom-voice-container"),
+                ("voice_design", "voice-design-container"),
+            ):
+                try:
+                    w = self.query_one(f"#{prefix}-{suffix}")
+                    w.display = (mode == self.mode)
+                except Exception:
+                    pass
+        # Sync both mode selects to the current mode
+        for sid in ("gen-mode-select", "batch-mode-select"):
+            try:
+                sel = self.query_one(f"#{sid}", Select)
+                if sel.value != self.mode:
+                    sel.value = self.mode
+            except Exception:
+                pass
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id not in ("gen-mode-select", "batch-mode-select"):
+            return
+        new_mode = event.value
+        if new_mode is Select.BLANK or new_mode == self.mode:
+            return
+        self.mode = new_mode
+        self._persist_mode()
+        self._apply_mode_visibility()
+        self.gen_log_message(f"[dim]Mode → {self.mode}[/dim]")
+        # Model weights reload lazily on next generate; just note it here.
+        if self._model_mode != self.mode:
+            self.gen_log_message(
+                f"[yellow]Next generate will load {MODEL_IDS[self.mode]}[/yellow]"
+            )
 
     def create_log_message(self, msg: str) -> None:
         self.query_one("#create-log", RichLog).write(msg)
@@ -655,27 +787,41 @@ class VoiceCloneApp(App):
     # ── Generate ─────────────────────────────────────────────────
 
     def action_generate(self) -> None:
-        if self.model is None:
-            self.gen_log_message("[red]Model not loaded yet[/red]")
-            return
-
-        voice_dir = self.query_one("#voice-select", Select).value
-        if voice_dir is Select.BLANK:
-            self.gen_log_message("[red]Please select a voice[/red]")
-            return
-
-        ref_audio = str(Path(voice_dir) / "ref_audio.wav")
-        if not os.path.isfile(ref_audio):
-            self.gen_log_message(f"[red]Reference audio not found: {ref_audio}[/red]")
-            return
-
         text = self.query_one("#synth-text", TextArea).text.strip()
         if not text:
             self.gen_log_message("[red]Please enter text to synthesize[/red]")
             return
 
-        meta = load_voice_meta(voice_dir)
-        ref_text = meta.get("transcript", "")
+        # Collect mode-specific inputs
+        mode_kwargs: dict = {}
+        if self.mode == "clone":
+            voice_dir = self.query_one("#voice-select", Select).value
+            if voice_dir is Select.BLANK:
+                self.gen_log_message("[red]Please select a voice[/red]")
+                return
+            ref_audio = str(Path(voice_dir) / "ref_audio.wav")
+            if not os.path.isfile(ref_audio):
+                self.gen_log_message(f"[red]Reference audio not found: {ref_audio}[/red]")
+                return
+            meta = load_voice_meta(voice_dir)
+            mode_kwargs["ref_audio"] = ref_audio
+            mode_kwargs["ref_text"] = meta.get("transcript", "") or None
+
+        elif self.mode == "custom_voice":
+            speaker = self.query_one("#gen-speaker-select", Select).value
+            if speaker is Select.BLANK:
+                self.gen_log_message("[red]Please select a speaker[/red]")
+                return
+            mode_kwargs["voice"] = speaker
+            instruct = self.query_one("#gen-cv-instruct", Input).value.strip()
+            mode_kwargs["instruct"] = instruct or None
+
+        elif self.mode == "voice_design":
+            description = self.query_one("#gen-vd-instruct", Input).value.strip()
+            if not description:
+                self.gen_log_message("[red]Please enter a voice description[/red]")
+                return
+            mode_kwargs["instruct"] = description
 
         lang = self.query_one("#language-select", Select).value
 
@@ -695,15 +841,50 @@ class VoiceCloneApp(App):
 
         self.query_one("#generate-btn", Button).disabled = True
         self.run_generation(
-            ref_audio, ref_text, text, lang, speed,
+            self.mode, mode_kwargs, text, lang, speed,
             temperature, top_k, top_p, rep_penalty,
         )
+
+    def _ensure_model_loaded(self, mode: str) -> bool:
+        """Worker-thread helper: load the weights for `mode` if not already active.
+
+        Returns True on success, False on failure. Caller must be inside a worker.
+        """
+        if self.model is not None and self._model_mode == mode:
+            return True
+
+        model_id = MODEL_IDS[mode]
+        self.call_from_thread(
+            self.gen_log_message,
+            f"[yellow]Loading {mode} weights ({model_id})…[/yellow]",
+        )
+        self.model = None
+        import gc
+        gc.collect()
+        try:
+            model, loaded_id = load_model(mode, auto_confirm=True)
+        except Exception as e:
+            self.call_from_thread(
+                self.gen_log_message,
+                f"[red]Failed to load {mode} model: {e}[/red]",
+            )
+            return False
+
+        self.model = model
+        self.model_id = loaded_id
+        self._model_mode = mode
+        self.call_from_thread(
+            self.gen_log_message,
+            f"[green]Loaded: {loaded_id}[/green]",
+        )
+        self.call_from_thread(lambda: setattr(self, "sub_title", loaded_id))
+        return True
 
     @work(thread=True)
     def run_generation(
         self,
-        ref_audio: str,
-        ref_text: str,
+        mode: str,
+        mode_kwargs: dict,
         text: str,
         lang: str,
         speed: float,
@@ -712,6 +893,10 @@ class VoiceCloneApp(App):
         top_p: float,
         rep_penalty: float,
     ) -> None:
+        if not self._ensure_model_loaded(mode):
+            self.call_from_thread(self._generation_done, False)
+            return
+
         chunks = chunk_text(text)
         total = len(chunks)
         self.call_from_thread(
@@ -731,36 +916,29 @@ class VoiceCloneApp(App):
             )
 
             try:
-                kwargs = dict(
-                    text=chunk,
-                    ref_audio=ref_audio,
+                audio, sr, chunk_mem = tts_generate(
+                    mode,
+                    self.model,
+                    chunk,
                     lang_code=lang,
+                    speed=speed,
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
                     repetition_penalty=rep_penalty,
+                    **mode_kwargs,
                 )
-                if ref_text:
-                    kwargs["ref_text"] = ref_text
-                if speed != 1.0:
-                    kwargs["speed"] = speed
 
-                results = list(self.model.generate(**kwargs))
-                if not results:
+                if audio is None:
                     self.call_from_thread(
                         self.gen_log_message,
                         f"  [yellow]No audio for chunk {i}, skipping[/yellow]",
                     )
                     continue
 
-                result = results[0]
-                audio = np.array(result.audio)
-                sr = getattr(result, "sample_rate", SAMPLE_RATE)
                 all_audio.append(audio)
-
+                peak_mem = max(peak_mem, chunk_mem)
                 chunk_dur = len(audio) / sr
-                mem = getattr(result, "peak_memory_usage", 0.0)
-                peak_mem = max(peak_mem, mem)
                 self.call_from_thread(
                     self.gen_log_message,
                     f"  [green]Chunk {i} done[/green] — {chunk_dur:.1f}s audio",
@@ -772,11 +950,6 @@ class VoiceCloneApp(App):
                     self.gen_log_message,
                     f"  [red]Error chunk {i}: {err}[/red]",
                 )
-                if "memory" in err.lower():
-                    self.call_from_thread(
-                        self.gen_log_message,
-                        "[red]Out of memory — try the 0.6B model[/red]",
-                    )
                 break
 
         if not all_audio:
@@ -886,20 +1059,39 @@ class VoiceCloneApp(App):
     # ── Batch ────────────────────────────────────────────────────
 
     def start_batch(self) -> None:
-        voice_dir = self.query_one("#batch-voice-select", Select).value
-        if voice_dir is Select.BLANK:
-            self.batch_log_message("[red]Please select a voice[/red]")
-            return
-
-        ref_audio = str(Path(voice_dir) / "ref_audio.wav")
-        if not os.path.isfile(ref_audio):
-            self.batch_log_message(f"[red]Reference audio not found: {ref_audio}[/red]")
-            return
-
         source_path = self.query_one("#batch-source-input", Input).value.strip()
         if not source_path or not os.path.isfile(source_path):
             self.batch_log_message("[red]Please enter a valid source file path[/red]")
             return
+
+        # Collect mode-specific inputs
+        mode_kwargs: dict = {}
+        if self.mode == "clone":
+            voice_dir = self.query_one("#batch-voice-select", Select).value
+            if voice_dir is Select.BLANK:
+                self.batch_log_message("[red]Please select a voice[/red]")
+                return
+            ref_audio = str(Path(voice_dir) / "ref_audio.wav")
+            if not os.path.isfile(ref_audio):
+                self.batch_log_message(f"[red]Reference audio not found: {ref_audio}[/red]")
+                return
+            meta = load_voice_meta(voice_dir)
+            mode_kwargs["ref_audio"] = ref_audio
+            mode_kwargs["ref_text"] = meta.get("transcript", "") or None
+        elif self.mode == "custom_voice":
+            speaker = self.query_one("#batch-speaker-select", Select).value
+            if speaker is Select.BLANK:
+                self.batch_log_message("[red]Please select a speaker[/red]")
+                return
+            mode_kwargs["voice"] = speaker
+            instruct = self.query_one("#batch-cv-instruct", Input).value.strip()
+            mode_kwargs["instruct"] = instruct or None
+        elif self.mode == "voice_design":
+            description = self.query_one("#batch-vd-instruct", Input).value.strip()
+            if not description:
+                self.batch_log_message("[red]Please enter a voice description[/red]")
+                return
+            mode_kwargs["instruct"] = description
 
         # Read source file
         text = Path(source_path).read_text(encoding="utf-8").strip()
@@ -932,8 +1124,6 @@ class VoiceCloneApp(App):
             self.batch_log_message("[red]No segments produced[/red]")
             return
 
-        meta = load_voice_meta(voice_dir)
-        ref_text = meta.get("transcript", "")
         lang = self.query_one("#batch-language-select", Select).value
 
         try:
@@ -955,15 +1145,15 @@ class VoiceCloneApp(App):
         self.query_one("#batch-cancel-btn", Button).disabled = False
 
         self.run_batch(
-            ref_audio, ref_text, segments, out_dir, lang, speed,
+            self.mode, mode_kwargs, segments, out_dir, lang, speed,
             temperature, top_k, top_p, rep_penalty,
         )
 
     @work(thread=True)
     def run_batch(
         self,
-        ref_audio: str,
-        ref_text: str,
+        mode: str,
+        mode_kwargs: dict,
         segments: list[str],
         out_dir: Path,
         lang: str,
@@ -973,6 +1163,10 @@ class VoiceCloneApp(App):
         top_p: float,
         rep_penalty: float,
     ) -> None:
+        if not self._ensure_model_loaded(mode):
+            self.call_from_thread(self._batch_done)
+            return
+
         out_dir.mkdir(parents=True, exist_ok=True)
         total = len(segments)
         self.call_from_thread(
@@ -999,22 +1193,20 @@ class VoiceCloneApp(App):
             )
 
             try:
-                kwargs = dict(
-                    text=segment,
-                    ref_audio=ref_audio,
+                audio, sr, _ = tts_generate(
+                    mode,
+                    self.model,
+                    segment,
                     lang_code=lang,
+                    speed=speed,
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
                     repetition_penalty=rep_penalty,
+                    **mode_kwargs,
                 )
-                if ref_text:
-                    kwargs["ref_text"] = ref_text
-                if speed != 1.0:
-                    kwargs["speed"] = speed
 
-                results = list(self.model.generate(**kwargs))
-                if not results:
+                if audio is None:
                     self.call_from_thread(
                         self.batch_log_message,
                         f"  [yellow]No audio for segment {i}, skipping[/yellow]",
@@ -1022,10 +1214,6 @@ class VoiceCloneApp(App):
                     failed += 1
                     manifest_lines.append(f"{i:03d}\tFAILED\t{segment[:60]}")
                     continue
-
-                result = results[0]
-                audio = np.array(result.audio)
-                sr = getattr(result, "sample_rate", SAMPLE_RATE)
 
                 wav_name = f"{i:03d}.wav"
                 sf.write(str(out_dir / wav_name), audio, sr)
@@ -1226,8 +1414,11 @@ class VoiceCloneApp(App):
 
 
 if __name__ == "__main__":
-    print("Loading TTS model...")
-    model, model_id = load_model_with_fallback()
+    saved_mode = _load_config().get("mode", "clone")
+    if saved_mode not in MODES:
+        saved_mode = "clone"
+    print(f"Loading {saved_mode} TTS model...")
+    model, model_id = load_model(saved_mode)
     print(f"Ready: {model_id}")
-    app = VoiceCloneApp(model, model_id)
+    app = VoiceCloneApp(model, model_id, mode=saved_mode)
     app.run()
